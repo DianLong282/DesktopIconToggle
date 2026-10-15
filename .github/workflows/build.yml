@@ -1,0 +1,61 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 编译
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          ./build.ps1 -Clean
+
+      - name: 检查产物
+        shell: pwsh
+        run: |
+          $exe = 'dist/DesktopIconToggle.exe'
+          if (-not (Test-Path $exe)) { throw "没有生成 $exe" }
+          Get-Item $exe | Format-List Name, Length, LastWriteTime
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DesktopIconToggle
+          path: dist/DesktopIconToggle.exe
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: DesktopIconToggle
+          path: out
+
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 幂等：如果这个 tag 上已经有 Release（比如你在网页上手动建的），
+          # 就只把 exe 传上去，不重复创建。
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" out/DesktopIconToggle.exe --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              "out/DesktopIconToggle.exe#DesktopIconToggle.exe" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
