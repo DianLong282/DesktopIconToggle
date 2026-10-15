@@ -1,0 +1,7 @@
+# 仓库内存 LF，检出到工作区用 CRLF（这是一个 Windows 专用项目）
+* text=auto eol=crlf
+
+# 二进制文件不做换行转换
+*.ico binary
+*.exe binary
+*.png binary
