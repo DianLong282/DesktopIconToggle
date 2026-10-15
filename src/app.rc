@@ -1,0 +1,6 @@
+#include <windows.h>
+
+// Numeric ID on purpose: rc.exe does not know C++ symbol constants, so a symbol
+// name here becomes a *string* resource name and LoadImage(MAKEINTRESOURCE(1))
+// would not find the icon. Must match IDI_APPICON in main.cpp.
+1 ICON "app.ico"
