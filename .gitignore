@@ -1,0 +1,26 @@
+# 构建产物
+/build/
+/dist/
+
+# 程序运行时在 exe 同目录生成的东西
+trace.log
+diag.txt
+
+# MSVC 中间文件
+*.obj
+*.res
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.exe
+
+# Visual Studio / 编辑器
+.vs/
+*.user
+*.suo
+*.sln
+
+# Python
+__pycache__/
+*.pyc
