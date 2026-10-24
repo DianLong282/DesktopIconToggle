@@ -48,14 +48,26 @@ jobs:
       - name: 发布 Release
         env:
           GH_TOKEN: ${{ github.token }}
+          # 这个 job 没有 checkout，目录里没有 .git，gh 无法自己推断是哪个仓库，
+          # 必须显式指定，否则会报 "not a git repository" 并以 exit 1 失败。
+          GH_REPO: ${{ github.repository }}
         run: |
-          # 幂等：如果这个 tag 上已经有 Release（比如你在网页上手动建的），
-          # 就只把 exe 传上去，不重复创建。
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" out/DesktopIconToggle.exe --clobber
-          else
-            gh release create "${GITHUB_REF_NAME}" \
-              "out/DesktopIconToggle.exe#DesktopIconToggle.exe" \
-              --title "${GITHUB_REF_NAME}" \
-              --generate-notes
+          set -euo pipefail
+
+          # 产物解压后的相对路径不写死，直接找，避免以后路径规则变化再踩坑
+          ls -R out
+          exe=$(find out -type f -name 'DesktopIconToggle.exe' | head -n 1)
+          if [ -z "$exe" ]; then
+            echo "::error::artifact 里找不到 DesktopIconToggle.exe"
+            exit 1
           fi
+          echo "uploading: $exe"
+
+          # 幂等：这个 tag 上已经有 Release（例如在网页上手动建的）就只传附件；
+          # 没有才创建。创建失败也容忍（可能是并发/可见性延迟），交给上传去报真正的错。
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes || true
+          fi
+          gh release upload "${GITHUB_REF_NAME}" "${exe}#DesktopIconToggle.exe" --clobber
