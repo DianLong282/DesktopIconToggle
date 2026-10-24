@@ -151,6 +151,13 @@ static void Trace(const wchar_t* fmt, ...)
 // ---------------------------------------------------------------------------
 static BOOL CALLBACK FindDefViewEnumProc(HWND hwnd, LPARAM lp)
 {
+    // 只认 Progman / WorkerW 的子窗口。
+    // 资源管理器文件夹窗口内部也有 SHELLDLL_DefView，但它的顶层是 CabinetWClass，
+    // 不能把它当成桌面。
+    wchar_t cls[64];
+    if (!GetClassNameW(hwnd, cls, ARRAYSIZE(cls))) return TRUE;
+    if (wcscmp(cls, L"WorkerW") != 0 && wcscmp(cls, L"Progman") != 0) return TRUE;
+
     HWND child = FindWindowExW(hwnd, nullptr, L"SHELLDLL_DefView", nullptr);
     if (child) {
         *(HWND*)lp = child;
@@ -178,18 +185,35 @@ static HWND FindDesktopListView()
     return FindWindowExW(dv, nullptr, L"SysListView32", nullptr);
 }
 
-static bool IsDesktopContainer(HWND h)
+static bool IsUnderWindow(HWND child, HWND ancestor)
 {
-    wchar_t cls[64];
-    for (HWND w = h; w; w = GetParent(w)) {
-        if (!GetClassNameW(w, cls, ARRAYSIZE(cls))) break;
-        if (!wcscmp(cls, L"SHELLDLL_DefView") ||
-            !wcscmp(cls, L"Progman") ||
-            !wcscmp(cls, L"WorkerW")) {
-            return true;
-        }
+    if (!child || !ancestor) return false;
+    for (HWND w = child; w; w = GetParent(w)) {
+        if (w == ancestor) return true;
     }
     return false;
+}
+
+// 判断这次点击是否落在"桌面"上。
+//
+// 关键：不能靠类名判断！资源管理器的文件夹窗口内部同样用 SHELLDLL_DefView 承载文件列表，
+// 按类名往上找会把"在资源管理器里双击"误判成"点了桌面"（v1.0.0 的 bug）。
+// 必须比对本进程找到的那一个桌面 DefView 的窗口句柄。
+static bool IsDesktopHit(HWND hit, HWND desktopDefView)
+{
+    if (!hit) return false;
+
+    // 落在桌面的 DefView 子树里（图标隐藏时，命中的就是这个 DefView 本身）
+    if (IsUnderWindow(hit, desktopDefView)) return true;
+
+    // 桌面背景根窗口：多显示器上图标列表并不铺满整个桌面，
+    // 主屏之外的空白处命中的可能是 Progman 本身，或承载桌面的那个 WorkerW。
+    HWND root = GetAncestor(hit, GA_ROOT);
+    if (!root) return false;
+    wchar_t cls[64];
+    if (!GetClassNameW(root, cls, ARRAYSIZE(cls))) return false;
+    if (wcscmp(cls, L"Progman") == 0) return true;
+    return wcscmp(cls, L"WorkerW") == 0 && root == GetAncestor(desktopDefView, GA_ROOT);
 }
 
 // ---------------------------------------------------------------------------
@@ -349,10 +373,11 @@ static ToggleReport ToggleDesktopIcons()
 // ---------------------------------------------------------------------------
 // 双击事件处理
 // ---------------------------------------------------------------------------
-static void HandleDesktopDoubleClick(POINT pt)
+static void HandleDesktopDoubleClick(POINT pt, bool apply)
 {
-    HWND lv = FindDesktopListView();
-    if (!lv) {
+    HWND dv = FindDefView();
+    HWND lv = dv ? FindWindowExW(dv, nullptr, L"SysListView32", nullptr) : nullptr;
+    if (!dv || !lv) {
         Trace(L"双击 (%d, %d) -> 未找到桌面图标列表视图，忽略", pt.x, pt.y);
         return;
     }
@@ -365,6 +390,12 @@ static void HandleDesktopDoubleClick(POINT pt)
 
     wchar_t cls[64] = L"<未知>";
     GetClassNameW(hit, cls, ARRAYSIZE(cls));
+
+    // 先排除"不是桌面"的点击：资源管理器窗口、任务栏、别的程序……
+    if (!IsDesktopHit(hit, dv)) {
+        Trace(L"双击 (%d, %d) -> 窗口=%s，不属于桌面，忽略", pt.x, pt.y, cls);
+        return;
+    }
 
     if (hit == lv) {
         // 点在桌面图标列表视图上：区分"图标"与"空白"
@@ -379,8 +410,10 @@ static void HandleDesktopDoubleClick(POINT pt)
             Trace(L"双击 (%d, %d) -> 命中测试不可用，兜底判定为图标，忽略", pt.x, pt.y);
             return;
         }
-    } else if (!IsDesktopContainer(hit)) {
-        Trace(L"双击 (%d, %d) -> 窗口类=%s，不是桌面，忽略", pt.x, pt.y, cls);
+    }
+
+    if (!apply) {
+        Trace(L"双击 (%d, %d) -> 桌面空白（试运行，未切换）", pt.x, pt.y);
         return;
     }
 
@@ -761,7 +794,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 {
     switch (msg) {
     case WM_DO_TOGGLE:
-        HandleDesktopDoubleClick(g_clickPt);
+        HandleDesktopDoubleClick(g_clickPt, true);
         return 0;
 
     case WM_TRAY_CALLBACK:
@@ -903,44 +936,28 @@ static void DiagProbe()
     LogFlush(L"diag.txt");
 }
 
+// 诊断：用与真实双击完全相同的判定路径跑一次，只报告结论、不真的切换。
+// 这样能安全地验证"某处双击会不会误触发"，而不必真的去双击那里。
 static void ClickProbe(int x, int y)
 {
     POINT pt = { x, y };
-    HWND lv = FindDesktopListView();
+    g_trace = true;                      // 让判定过程写进 trace.log
+
+    HWND dv  = FindDefView();
+    HWND lv  = dv ? FindWindowExW(dv, nullptr, L"SysListView32", nullptr) : nullptr;
     HWND hit = WindowFromPoint(pt);
+
     wchar_t c[64] = L"<无>";
     if (hit) GetClassNameW(hit, c, ARRAYSIZE(c));
 
-    LogW(L"== 点击判定 (%d, %d) ==", x, y);
+    LogW(L"== --click (%d, %d) 试运行（走真实判定逻辑，不切换）==", x, y);
     LogW(L"WindowFromPoint = 0x%p (类=%s)", (void*)hit, c);
+    LogW(L"桌面 DefView    = 0x%p", (void*)dv);
     LogW(L"桌面 ListView   = 0x%p", (void*)lv);
+    LogW(L"属于桌面命中    = %s", IsDesktopHit(hit, dv) ? L"是" : L"否");
+    LogAppend(L"trace.log");
 
-    bool blankDecision = false;
-    if (!lv) {
-        LogW(L"未找到桌面 ListView");
-    } else if (hit == lv) {
-        RemoteSession s;
-        int r = RemoteHitTest(s, lv, pt);
-        RemoteClose(s);
-        LogW(L"LVM_HITTEST iItem = %d  (>=0 图标, -1 空白, -2 失败)", r);
-        if (r >= 0) blankDecision = false;
-        else if (r == -1) blankDecision = true;
-        else blankDecision = !PointOnIconFallback(lv);
-    } else {
-        blankDecision = IsDesktopContainer(hit);
-        LogW(L"命中窗口是否属于桌面容器 = %s", blankDecision ? L"是" : L"否");
-    }
-
-    LogW(L"判定结果: %s", blankDecision ? L"桌面空白 -> 会切换" : L"不是桌面空白 -> 不动作");
-    LogFlush(L"diag.txt");
-
-    if (blankDecision) {
-        ToggleReport r = ToggleDesktopIcons();
-        LogW(L"已切换: dv=%d lv=%d 可见 %d->%d 命令=%d 兜底=%d",
-             r.dvFound, r.lvFound, r.visibleBefore, r.visibleAfter,
-             r.cmdSent, r.fallbackUsed);
-        LogFlush(L"diag.txt");
-    }
+    HandleDesktopDoubleClick(pt, false);
 }
 
 // 合成一次真实的双击，用来端到端验证钩子链路
